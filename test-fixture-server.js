@@ -50,7 +50,7 @@ http.createServer((req, res) => {
     const raw = Buffer.concat(chunks).toString("utf8");
     const body = raw ? JSON.parse(raw) : null;
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
-    fs.appendFileSync(logPath, JSON.stringify({ method: req.method, path: url.pathname, body }) + "\n");
+    fs.appendFileSync(logPath, JSON.stringify({ method: req.method, path: url.pathname, body, raw }) + "\n");
 
     if (req.method === "POST" && url.pathname === "/api/agents/register") {
       const slug = String(body.name).toLowerCase().replace(/[^a-z0-9]+/g, "-");
@@ -77,6 +77,11 @@ http.createServer((req, res) => {
       return agent ? send(res, 200, agent) : send(res, 404, { detail: "not found" });
     }
     if (req.method === "POST" && url.pathname === "/api/consciousness/remember") {
+      if (body.deep) {
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.end(`event: done\ndata: ${JSON.stringify({ kind: "done", memory_id: randomUUID(), action: "new" })}\n\n`);
+        return;
+      }
       return send(res, 200, { memory_id: randomUUID() });
     }
     if (req.method === "POST" && url.pathname.match(/^\/api\/memories\/[^/]+\/share$/)) {

@@ -2,6 +2,11 @@
 
 All notable changes to `cogx` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [1.5.2] — 2026-08-10
+
+### Fixed
+- JSON request bodies now escape `<` and `>` as their equivalent Unicode sequences on the wire while preserving the exact decoded content. This prevents `cogx remember` from silently hanging behind ingress/security layers when memories contain comparisons, generic types, HTML-like text, or email addresses in angle brackets. The fix covers regular and `--deep` requests plus argv and piped-stdin input.
+
 ## [1.5.1] — 2026-08-10
 
 ### Fixed
