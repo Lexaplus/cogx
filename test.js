@@ -247,6 +247,33 @@ test("remember sends agent attribution and shares explicitly", () => {
   assert("share target canonical", delta[1].body.target_agent_slug === "aporta", JSON.stringify(delta));
 });
 
+test("remember escapes angle brackets on the wire without changing content", () => {
+  const cases = [
+    { content: "status < 500 marker", args: [] },
+    { content: "status > 500 marker", args: [] },
+    { content: "<section>safe</section>", args: [] },
+    { content: "vector<Map<string, number>>", args: [] },
+    { content: "Support <ops@example.com>", args: [] },
+    { content: "deep <memory> uses Result<T>", args: ["--deep"] },
+  ];
+
+  for (const { content, args } of cases) {
+    const before = requests().length;
+    const r = run(["remember", content, "--as-user", "--json", ...args]);
+    assert(`angle-bracket remember status: ${content}`, r.status === 0, r.stderr || r.stdout);
+    const req = requests().slice(before)[0];
+    assert(`angle-bracket content preserved: ${content}`, req && req.body.content === content, JSON.stringify(req || null));
+    assert(`no literal less-than on wire: ${content}`, req && !req.raw.includes("<"), req && req.raw);
+    assert(`no literal greater-than on wire: ${content}`, req && !req.raw.includes(">"), req && req.raw);
+    if (content.includes("<")) {
+      assert(`less-than escaped on wire: ${content}`, req && req.raw.includes("\\u003c"), req && req.raw);
+    }
+    if (content.includes(">")) {
+      assert(`greater-than escaped on wire: ${content}`, req && req.raw.includes("\\u003e"), req && req.raw);
+    }
+  }
+});
+
 test("talk carries agent task and scope", () => {
   const before = requests().length;
   const r = run(["talk", "check architecture", "--agent", "Aporta", "--task", "coordinate Aira", "--scope", "strict", "--json"]);
@@ -512,10 +539,12 @@ test("stdin that never closes does not hang recall or search", () => {
 
 test("a piped producer is still read in full", () => {
   const before = requests().length;
-  const r = run(["remember", "--as-user", "--json"], { stdin: "piped body from a file\n" });
+  const r = run(["remember", "--as-user", "--json"], { stdin: "piped status < 500 from a file\n" });
   assert("piped remember status", r.status === 0, r.stderr || r.stdout);
   const delta = requests().slice(before);
-  assert("piped content preserved", delta[0] && delta[0].body.content === "piped body from a file", JSON.stringify(delta[0] || null));
+  assert("piped content preserved", delta[0] && delta[0].body.content === "piped status < 500 from a file", JSON.stringify(delta[0] || null));
+  assert("piped less-than escaped on wire", delta[0] && delta[0].raw.includes("\\u003c"), delta[0] && delta[0].raw);
+  assert("piped wire has no literal less-than", delta[0] && !delta[0].raw.includes("<"), delta[0] && delta[0].raw);
 });
 
 test("argv and a pipe are still combined", () => {

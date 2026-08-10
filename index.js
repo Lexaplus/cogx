@@ -13,7 +13,7 @@ if (typeof fetch !== "function") {
   process.exit(1);
 }
 
-const VERSION = "1.5.1";
+const VERSION = "1.5.2";
 const API_URL = (process.env.ICOG_API_URL || "https://api.cognitivx.io").replace(/\/$/, "");
 const DEFAULT_SENSE_URL = (process.env.COGX_SENSE_URL || "http://127.0.0.1:48200").replace(/\/$/, "");
 const ICOG_DIR = path.join(os.homedir(), ".icog");
@@ -327,12 +327,21 @@ async function readStdinFor(argText) {
 const TRANSIENT_STATUS = new Set([502, 503, 504]);
 const RETRY_DELAYS_MS = [1000, 3000, 8000];
 
+// Keep JSON semantically identical while avoiding literal angle brackets on
+// the wire. Some ingress/security layers treat them as markup and can stall
+// the request instead of returning an HTTP error.
+function jsonBodyForWire(value) {
+  return JSON.stringify(value).replace(/[<>]/g, (ch) =>
+    ch === "<" ? "\\u003c" : "\\u003e"
+  );
+}
+
 async function httpRequest(method, route, { body, auth = true, timeoutMs = DEFAULT_TIMEOUT_MS, retries = true, headers: extraHeaders = {} } = {}) {
   const url = API_URL + route;
   const headers = { "Content-Type": "application/json", "User-Agent": `cogx/${VERSION}`, ...extraHeaders };
   if (auth) headers["X-API-Key"] = getApiKey();
   const opts = { method, headers };
-  if (body !== undefined) opts.body = JSON.stringify(body);
+  if (body !== undefined) opts.body = jsonBodyForWire(body);
 
   const attempts = retries ? RETRY_DELAYS_MS.length + 1 : 1;
   let lastErr;
@@ -390,7 +399,7 @@ async function httpStream(method, route, { body, onEvent, timeoutMs = 120000 } =
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let r;
   try {
-    r = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: controller.signal });
+    r = await fetch(url, { method, headers, body: body ? jsonBodyForWire(body) : undefined, signal: controller.signal });
   } catch (e) {
     clearTimeout(timer);
     throw e;
@@ -1395,7 +1404,7 @@ async function webhookNotification(url, event) {
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", "User-Agent": `cogx/${VERSION}` },
-      body: JSON.stringify(event),
+      body: jsonBodyForWire(event),
       signal: controller.signal,
     });
     if (!response.ok) return { status: "failed", error: `HTTP ${response.status}` };
@@ -1414,7 +1423,7 @@ async function senseRequest(baseUrl, route, body) {
     const response = await fetch(`${baseUrl}${route}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "User-Agent": `cogx/${VERSION}` },
-      body: JSON.stringify(body),
+      body: jsonBodyForWire(body),
       signal: controller.signal,
     });
     let payload = null;
