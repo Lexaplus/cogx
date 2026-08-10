@@ -13,7 +13,7 @@ if (typeof fetch !== "function") {
   process.exit(1);
 }
 
-const VERSION = "1.5.0";
+const VERSION = "1.5.1";
 const API_URL = (process.env.ICOG_API_URL || "https://api.cognitivx.io").replace(/\/$/, "");
 const DEFAULT_SENSE_URL = (process.env.COGX_SENSE_URL || "http://127.0.0.1:48200").replace(/\/$/, "");
 const ICOG_DIR = path.join(os.homedir(), ".icog");
@@ -264,14 +264,60 @@ function commaList(value) {
 // stdin
 // ---------------------------------------------------------------------------
 
-async function readStdin() {
+// A non-TTY stdin is not a promise that EOF will ever arrive. Agent harnesses
+// (Claude Code, Codex, CI runners) routinely hand a child a socket or pipe that
+// stays open for the life of the session, so waiting unconditionally for "end"
+// made every stdin-consuming command hang forever — no output, no error, no
+// request ever sent. That is indistinguishable from a dead CLI, and it silently
+// dropped whatever the caller was trying to store.
+//
+// So bound the wait for the *first byte* only. Once a producer has shown itself
+// we let it take as long as it likes, which keeps `slow-command | cogx remember`
+// working; it is the never-writes case that has to stop being fatal.
+const STDIN_WAIT_MS = parseInt(process.env.COGX_STDIN_WAIT_MS || "10000", 10);
+// When argv already carries the text, stdin is at most an extra. Peek briefly
+// so `echo more | cogx remember "note"` still appends, then move on.
+const STDIN_PEEK_MS = parseInt(process.env.COGX_STDIN_PEEK_MS || "250", 10);
+
+async function readStdin({ waitMs = STDIN_WAIT_MS } = {}) {
   if (process.stdin.isTTY) return "";
   const chunks = [];
   return new Promise((resolve, reject) => {
-    process.stdin.on("data", (chunk) => chunks.push(chunk));
-    process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf8").trim()));
-    process.stdin.on("error", reject);
+    let settled = false;
+    let timer = null;
+
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      process.stdin.removeListener("data", onData);
+      process.stdin.removeListener("end", onEnd);
+      process.stdin.removeListener("error", onError);
+      // Release the handle, or an unclosed stdin keeps the event loop alive and
+      // the process still never exits — the same hang one step later.
+      process.stdin.pause();
+      fn(value);
+    };
+
+    const onData = (chunk) => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      chunks.push(chunk);
+    };
+    const onEnd = () => finish(resolve, Buffer.concat(chunks).toString("utf8").trim());
+    const onError = (err) => finish(reject, err);
+
+    process.stdin.on("data", onData);
+    process.stdin.on("end", onEnd);
+    process.stdin.on("error", onError);
+
+    if (waitMs > 0) timer = setTimeout(() => finish(resolve, ""), waitMs);
   });
+}
+
+// Text may come from argv, from a pipe, or both. Callers that already have argv
+// text use this so a stalled stdin costs a blink instead of the whole command.
+async function readStdinFor(argText) {
+  return readStdin({ waitMs: argText ? STDIN_PEEK_MS : STDIN_WAIT_MS });
 }
 
 // ---------------------------------------------------------------------------
@@ -796,7 +842,7 @@ async function cmdMcpUpdate(args, flags) {
 
 async function cmdRecall(args, flags) {
   let query = args.join(" ").trim();
-  const stdinData = await readStdin();
+  const stdinData = await readStdinFor(query);
   if (stdinData) query = (query + " " + stdinData).trim();
   if (!query) die("usage: cogx recall <query>  (or pipe via stdin)");
 
@@ -858,7 +904,7 @@ async function cmdRecall(args, flags) {
 
 async function cmdRemember(args, flags) {
   let content = args.join(" ").trim();
-  const stdinData = await readStdin();
+  const stdinData = await readStdinFor(content);
   if (stdinData) content = content ? `${content}\n\n${stdinData}` : stdinData;
   if (!content) die("usage: cogx remember <text> [--type semantic|episodic|procedural|foundational]\n       (or pipe via stdin)");
 
@@ -946,7 +992,7 @@ async function cmdUpdate(args) {
 
 async function cmdTalk(args, flags) {
   let message = args.join(" ").trim();
-  const stdinData = await readStdin();
+  const stdinData = await readStdinFor(message);
   if (stdinData) message = message ? `${message}\n\n${stdinData}` : stdinData;
   if (!message) die("usage: cogx talk <message>  (or pipe via stdin)");
 
@@ -2001,7 +2047,7 @@ async function cmdOrchestrate(args, flags) {
 
 async function cmdSearch(args, flags) {
   let query = args.join(" ").trim();
-  const stdinData = await readStdin();
+  const stdinData = await readStdinFor(query);
   if (stdinData) query = (query + " " + stdinData).trim();
   if (!query) die("usage: cogx search <query>");
   const max = parseInt(flags.limit || "5", 10);

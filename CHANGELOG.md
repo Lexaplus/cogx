@@ -2,6 +2,12 @@
 
 All notable changes to `cogx` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [1.5.1] — 2026-08-10
+
+### Fixed
+- Commands that consult stdin (`remember`, `recall`, `talk`, `search`, and the argv-or-stdin commands) no longer hang forever when stdin is a pipe or socket that is never closed. Agent harnesses and CI runners routinely hand a child an stdin that stays open for the whole session; waiting unconditionally for EOF meant the command produced no output, no error, and never sent its request — losing whatever the caller was trying to store. The wait is now bounded to the first byte: a producer that has started writing is still read to completion, so piping is unaffected.
+- `COGX_STDIN_WAIT_MS` (default 10000) and `COGX_STDIN_PEEK_MS` (default 250, used when argv already carries the text) tune those bounds.
+
 ## [1.5.0] — 2026-07-14
 
 ### Added

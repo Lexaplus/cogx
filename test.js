@@ -453,6 +453,83 @@ test("agent activate --notify is eval-safe and manages the supervisor", () => {
   assert("activate notify stopped", stopped.status === 0, stopped.stderr || stopped.stdout);
 });
 
+// Regression: an agent harness hands the child an stdin pipe and never closes
+// it. spawnSync always closes stdin, so the whole suite above misses this —
+// the command has to be started with a live pipe left open on purpose.
+// The probe runs in its own process because the assertions here are synchronous:
+// blocking this thread to wait would also block the event loop that reports the
+// child's exit, so the test could never tell "hung" from "not observed yet".
+function runWithOpenStdin(args, timeoutMs = 8000) {
+  const probe = `
+    const { spawn } = require("child_process");
+    const cliArgs = JSON.parse(process.argv[1]);
+    const child = spawn(process.execPath, [process.argv[2], ...cliArgs], { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "", stderr = "", reported = false;
+    child.stdout.on("data", (d) => { stdout += d; });
+    child.stderr.on("data", (d) => { stderr += d; });
+    const report = (exited, status) => {
+      if (reported) return;
+      reported = true;
+      clearTimeout(timer);
+      process.stdout.write(JSON.stringify({ exited, status, stdout, stderr }));
+      process.exit(0);
+    };
+    const timer = setTimeout(() => { child.kill("SIGKILL"); report(false, null); }, ${timeoutMs});
+    // "close" rather than "exit" so stdout is fully drained before reporting.
+    child.on("close", (code) => report(true, code));
+  `;
+  const r = spawnSync("node", ["-e", probe, JSON.stringify(args), CLI], {
+    env,
+    encoding: "utf8",
+    timeout: timeoutMs + 5000,
+  });
+  try { return JSON.parse(r.stdout); }
+  catch { return { exited: false, status: null, stdout: r.stdout || "", stderr: r.stderr || "" }; }
+}
+
+test("stdin that never closes does not hang a command with argv content", () => {
+  const before = requests().length;
+  // --as-user because earlier tests register several agents, which would
+  // otherwise make a bare write ambiguous and mask what this test is checking.
+  const r = runWithOpenStdin(["remember", "note from an agent harness", "--as-user", "--json"]);
+  assert("remember exits with stdin held open", r.exited, `stdout=${r.stdout} stderr=${r.stderr}`);
+  assert("remember succeeded", r.status === 0, `status=${r.status} stderr=${r.stderr}`);
+  const delta = requests().slice(before);
+  assert("remember still sent the request", delta.length >= 1, JSON.stringify(delta));
+  assert(
+    "remember stored the argv text",
+    delta[0] && delta[0].body.content === "note from an agent harness",
+    JSON.stringify(delta[0] || null),
+  );
+});
+
+test("stdin that never closes does not hang recall or search", () => {
+  const recall = runWithOpenStdin(["recall", "anything", "--json"]);
+  assert("recall exits with stdin held open", recall.exited, recall.stderr);
+  const search = runWithOpenStdin(["search", "anything", "--json"]);
+  assert("search exits with stdin held open", search.exited, search.stderr);
+});
+
+test("a piped producer is still read in full", () => {
+  const before = requests().length;
+  const r = run(["remember", "--as-user", "--json"], { stdin: "piped body from a file\n" });
+  assert("piped remember status", r.status === 0, r.stderr || r.stdout);
+  const delta = requests().slice(before);
+  assert("piped content preserved", delta[0] && delta[0].body.content === "piped body from a file", JSON.stringify(delta[0] || null));
+});
+
+test("argv and a pipe are still combined", () => {
+  const before = requests().length;
+  const r = run(["remember", "headline", "--as-user", "--json"], { stdin: "appended detail\n" });
+  assert("combined remember status", r.status === 0, r.stderr || r.stdout);
+  const delta = requests().slice(before);
+  assert(
+    "combined content keeps both halves",
+    delta[0] && delta[0].body.content === "headline\n\nappended detail",
+    JSON.stringify(delta[0] || null),
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
